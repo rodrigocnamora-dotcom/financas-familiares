@@ -50,17 +50,37 @@ async function init() {
   renderLoading();
   const { data: { session: s } } = await supabaseClient.auth.getSession();
   session = s;
-  isAdmin = !!session;
 
-  supabaseClient.auth.onAuthStateChange((_event, s2) => {
+  supabaseClient.auth.onAuthStateChange(async (_event, s2) => {
     session = s2;
-    isAdmin = !!session;
-    renderApp();
+    if (session) {
+      await checkAdminStatus();
+      await loadAllData();
+      subscribeRealtime();
+      renderApp();
+    } else {
+      isAdmin = false;
+      transactions = []; rules = {}; budgets = {}; ownAccounts = [];
+      renderApp();
+    }
   });
 
-  await loadAllData();
-  subscribeRealtime();
+  if (session) {
+    await checkAdminStatus();
+    await loadAllData();
+    subscribeRealtime();
+  }
   renderApp();
+}
+
+async function checkAdminStatus() {
+  if (!session) { isAdmin = false; return; }
+  try {
+    const { data, error } = await supabaseClient.from('admins').select('email').eq('email', session.user.email).maybeSingle();
+    isAdmin = !error && !!data;
+  } catch (e) {
+    isAdmin = false;
+  }
 }
 
 async function loadAllData() {
@@ -329,7 +349,7 @@ function renderAuthScreen() {
     <div class="auth-screen">
       <div class="auth-logo">💶</div>
       <div class="auth-title">Finanças Familiares</div>
-      <div class="auth-sub">Inicia sessão para adicionar e editar despesas.<br>Sem login, podes ver o dashboard em modo só-leitura.</div>
+      <div class="auth-sub">Inicia sessão com a conta que te foi criada para ver o dashboard da família.</div>
       <div class="auth-error" id="auth-error"></div>
       <div class="form-row">
         <label class="form-label">Email</label>
@@ -340,7 +360,6 @@ function renderAuthScreen() {
         <input class="form-input" id="auth-password" type="password" placeholder="••••••••" autocomplete="current-password">
       </div>
       <button class="btn-primary" id="auth-submit" onclick="handleLogin()">Iniciar sessão</button>
-      <div class="auth-toggle"><a href="#" onclick="continueAsViewer();return false;">Continuar sem sessão (só ver)</a></div>
     </div>`;
 }
 
@@ -372,10 +391,6 @@ async function handleLogin() {
   }
 }
 
-function continueAsViewer() {
-  renderApp();
-}
-
 async function handleLogout() {
   await supabaseClient.auth.signOut();
   showToast('Sessão terminada.');
@@ -384,6 +399,7 @@ async function handleLogout() {
 // ---------------- Render: App shell ----------------
 
 function renderApp() {
+  if (!session) { renderAuthScreen(); return; }
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="topbar">
@@ -395,8 +411,8 @@ function renderApp() {
             ${MONTHS[currentMonth]} ${currentYear} ${isAdmin ? '· admin' : '· só leitura'}
           </div>
         </div>
-        <button class="icon-btn" onclick="${isAdmin ? 'handleLogout()' : 'renderAuthScreen()'}">
-          <i class="ti ${isAdmin ? 'ti-logout' : 'ti-login'}" aria-hidden="true"></i>
+        <button class="icon-btn" onclick="handleLogout()">
+          <i class="ti ti-logout" aria-hidden="true"></i>
         </button>
       </div>
     </div>
