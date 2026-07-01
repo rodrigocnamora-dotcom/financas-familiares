@@ -16,11 +16,11 @@ const MONTHS = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','A
 
 const BANK_HINTS = {
   revolut: 'Revolut: Conta → Extrato → Exportar CSV',
-  santander: 'Santander: Movimentos → Exportar → CSV',
-  millennium: 'Millennium: Consultas → Movimentos → Exportar'
+  santander: 'Santander: Movimentos → Exportar → XLS (aceita também CSV)',
+  millennium: 'Millennium: Consultas → Movimentos → Exportar XLS ou CSV'
 };
 const BANK_COLS = {
-  revolut: { date: 'Started Date', desc: 'Description', amount: 'Amount' },
+  revolut: { date: 'Data de início', desc: 'Descrição', amount: 'Montante' },
   santander: { date: 'Data mov.', desc: 'Descrição', amount: 'Valor' },
   millennium: { date: 'Data', desc: 'Descrição', amount: 'Valor' }
 };
@@ -212,6 +212,7 @@ function parseCSV(text, bank) {
   const dateIdx = headers.indexOf(cols.date);
   const descIdx = headers.indexOf(cols.desc);
   const amountIdx = headers.indexOf(cols.amount);
+  const statusIdx = headers.indexOf('Estado'); // só Revolut PT tem esta coluna
 
   if (dateIdx === -1 || descIdx === -1 || amountIdx === -1) {
     return { error: `Não encontrei as colunas esperadas para ${bank} ("${cols.date}", "${cols.desc}", "${cols.amount}"). Confirma se selecionaste o banco certo ou se o formato de exportação mudou.` };
@@ -221,6 +222,8 @@ function parseCSV(text, bank) {
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
     const vals = splitCSVLine(lines[i]);
+    // filtrar só transações concluídas (Revolut PT)
+    if (statusIdx !== -1 && vals[statusIdx] && vals[statusIdx].trim() !== 'CONCLUÍDA') continue;
     const rawAmount = (vals[amountIdx] || '0').replace(/[€\s]/g, '').replace(',', '.');
     const amount = parseFloat(rawAmount);
     const desc = (vals[descIdx] || '').trim();
@@ -229,6 +232,46 @@ function parseCSV(text, bank) {
     rows.push({ date, desc, amount, bank: bank.charAt(0).toUpperCase() + bank.slice(1) });
   }
   return rows;
+}
+
+function parseXLS(rows, bank) {
+  // Encontrar a linha de cabeçalho (a primeira que contém "Data" e "Descrição")
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const row = rows[i].map(c => String(c || '').trim());
+    if (row.some(c => c.includes('Data')) && row.some(c => c.includes('Descri'))) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx === -1) return { error: `Não encontrei o cabeçalho esperado no ficheiro ${bank}. Confirma se selecionaste o banco certo.` };
+
+  const headers = rows[headerIdx].map(c => String(c || '').trim());
+
+  // Detetar colunas pelo nome (tolerante a variações)
+  const dateIdx = headers.findIndex(h => h.includes('Data') && (h.includes('Opera') || h.includes('Mov') || h === 'Data'));
+  const descIdx = headers.findIndex(h => h.includes('Descri'));
+  const amountIdx = headers.findIndex(h => h.includes('Montante') || h.includes('Valor') || h.includes('Importe'));
+
+  if (dateIdx === -1 || descIdx === -1 || amountIdx === -1) {
+    return { error: `Não encontrei as colunas de data, descrição ou montante no ficheiro ${bank}.` };
+  }
+
+  const rows_data = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || row.length < 3) continue;
+    const desc = String(row[descIdx] || '').trim();
+    const rawAmount = String(row[amountIdx] || '').replace(/[€\s]/g, '').replace('.', '').replace(',', '.');
+    const amount = parseFloat(rawAmount);
+    const rawDate = String(row[dateIdx] || '').trim();
+    const date = normalizeDate(rawDate);
+    if (!desc || isNaN(amount) || amount === 0 || !date || date === 'undefined') continue;
+    rows_data.push({ date, desc, amount, bank: bank.charAt(0).toUpperCase() + bank.slice(1) });
+  }
+
+  if (!rows_data.length) return { error: 'Nenhuma transação válida encontrada no ficheiro. Verifica se o período tem movimentos.' };
+  return rows_data;
 }
 
 function splitCSVLine(line) {
@@ -793,14 +836,32 @@ function selectBank(b) { selectedBank = b; renderImportar(); }
 function handleFile(e) {
   const file = e.target.files[0];
   if (!file) return;
+  const isXLS = file.name.endsWith('.xls') || file.name.endsWith('.xlsx');
   const reader = new FileReader();
-  reader.onload = ev => {
-    const result = parseCSV(ev.target.result, selectedBank);
-    if (result.error) { showToast(result.error); return; }
-    importTransactions(result);
-  };
-  reader.onerror = () => showToast('Não foi possível ler o ficheiro.');
-  reader.readAsText(file);
+  if (isXLS) {
+    reader.onload = ev => {
+      try {
+        const workbook = XLSX.read(ev.target.result, { type: 'array', cellDates: true });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, dateNF: 'yyyy-mm-dd' });
+        const result = parseXLS(rows, selectedBank);
+        if (result.error) { showToast(result.error); return; }
+        importTransactions(result);
+      } catch(err) {
+        console.error(err);
+        showToast('Não foi possível ler o ficheiro XLS. Tenta exportar como CSV se disponível.');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  } else {
+    reader.onload = ev => {
+      const result = parseCSV(ev.target.result, selectedBank);
+      if (result.error) { showToast(result.error); return; }
+      importTransactions(result);
+    };
+    reader.onerror = () => showToast('Não foi possível ler o ficheiro.');
+    reader.readAsText(file);
+  }
   e.target.value = '';
 }
 
